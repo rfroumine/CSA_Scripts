@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import os
+
+
+import igraph
+
+
+RC_TABLE = str.maketrans('atgcATGC', 'tacgTACG')
+CDHIT_RE = re.compile('^.+>([0-9]+).+$')
+
+
+class Crispr:
+
+    def __init__(self, contig, start, end, spacers_seqs, consensus_repeat, evidence):
+        self.contig = contig
+        self.start = start
+        self.end = end
+        self.spacers_seqs = spacers_seqs
+        self.consensus_repeat = consensus_repeat
+        self.evidence = evidence
+
+        self.name = '%s_%s_%s' % (self.contig, self.start, self.end)
+
+        self.spacers = list()
+        self.strong_order = dict()
+        self.strong_misorders = list()
+
+def get_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input_fps', nargs='+', required=True, type=pathlib.Path,
+            help='Input file path containing multiple CRISPRCasFinder filepaths')
+    parser.add_argument('--output_prefix', type=str, default='./crispr_alignment',
+            help='Output file prefix [Default: ./crispr_alignment]')
+
+    args = parser.parse_args()
+
+    return args
+
+
+def main():
+    # Require Python 3.6 for set, dict order guarantee
+    if sys.version_info < (3, 6):
+        print('error: %s requires Python 3.6 or above' %  pathlib.Path(__file__).name)
+        sys.exit(1)
+
+    # Get command line arguments
+    args = get_arguments()
+
+    # Read in CRISPR data from json files
+    crisprs = parse_json_files(args.input_fps)
+    repeat_groups = {}
+    for crispr in crisprs:
+        if crispr.evidence > 2:
+            conRep = crispr.consensus_repeat.upper()
+            rev_conRep = conRep[::-1]
+            if (conRep not in repeat_groups) and (rev_conRep not in repeat_groups):
+                repeat_groups[conRep] = [crispr]
+            else:
+                if conRep in repeat_groups:
+                    repeat_groups[conRep].append(crispr)
+                if rev_conRep in repeat_groups:
+                    repeat_groups[rev_conRep].append(crispr)
+
+    # Print info about repeat_groups
+    num_crispr = 0
+    for key, val in repeat_groups.items():
+        num_crispr += len(val)
+        print(key,":", len(val))
+    print("num_unique_conReps:", len(repeat_groups), "num_crispr:", num_crispr)  
+
+
+def parse_json_files(input_fps):
+    crisprs = list()
+    for input_fp in input_fps:
+        with input_fp.open('r') as fh:
+            input_data = json.loads(fh.read())
+            date, version, command, contigs_data = input_data.values()
+            #genome_name = command.split()[3].replace("../","!").replace(".fasta","!").split("!")[1]
+            #print(genome_name)
+            for crispr in collect_crispr_from_json(contigs_data):
+                crisprs.append(crispr)
+    return crisprs
+
+
+def collect_crispr_from_json(contigs_data):
+    for contig_data in contigs_data:
+        # Skip contigs without crisprs
+        if not contig_data['Crisprs']:
+            continue
+
+        crispr_data_gen = (d for d in contig_data['Crisprs'])
+        contig_name = contig_data['Id']
+
+        # Extract each crispr found on this contig
+        for crispr_data in crispr_data_gen:
+            start = crispr_data['Start']
+            end = crispr_data['End']
+            spacers = [r['Sequence'] for r in crispr_data['Regions'] if r['Type'] == 'Spacer']
+            consensus_repeat = crispr_data['DR_Consensus']
+            evidence = crispr_data['Evidence_Level']
+            crispr = Crispr(contig_name, start, end, spacers, consensus_repeat, evidence)
+            yield crispr
+
+
+if __name__ == '__main__':
+    main()
